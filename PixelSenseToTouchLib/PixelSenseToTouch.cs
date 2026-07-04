@@ -1,14 +1,33 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.Diagnostics;
 using System.Text;
 using System.Windows.Forms;
-using InputSimulatorStandard;
 using Microsoft.Surface.Core;
 using TCD.System.TouchInjection;
 
 namespace PixelSenseToTouchLib
 {
+    // Touch bridge from the Surface 1.0 (PixelSense) vision system to native Windows
+    // touch input.
+    //
+    // Every Surface contact is injected as a real Windows touch pointer, and the full
+    // set of live pointers is re-injected on every contact event. Because genuine
+    // pointers reach Windows, the OS performs gesture recognition itself (tap = click,
+    // press-and-hold = right-click, drag, pinch/zoom), so no mouse emulation is needed.
+    //
+    // This replaces the earlier model that injected touch only for multi-finger cases
+    // and emulated single-finger clicks via the Surface tap/hold gesture events + a
+    // mouse simulator. That model had three defects that made real multi-touch
+    // unreliable:
+    //   1. On finger-up, the contact was removed from the tracking dictionary *before*
+    //      InjectTouchInput ran, so the UP was never delivered and Windows kept the
+    //      pointer down (ghost/stuck touches).
+    //   2. Surface events fire on background threads but a single shared PointerTouchInfo
+    //      struct was mutated without a lock, so concurrent finger events corrupted each
+    //      other's coordinates.
+    //   3. Pointer ids were contact.Id % 20, so two contacts whose ids are congruent
+    //      mod 20 collapsed onto one pointer.
     public class PixelSenseToTouch : IDisposable
     {
         public ContactTarget ContactTarget { get; set; }
@@ -18,47 +37,47 @@ namespace PixelSenseToTouchLib
 #if DEBUG
         public StringBuilder debuginfo;
 #endif
-        private InputSimulator inputSimulator;
-        private PointerTouchInfo touch = new PointerTouchInfo();
-        private Dictionary<uint, PointerTouchInfo> registeredTouches;
-        private HashSet<uint> injectedIds;
+
+        // Surface contact.Id -> the Windows touch pointer we injected for it.
+        private readonly Dictionary<int, LiveContact> liveContacts = new Dictionary<int, LiveContact>();
+        // Pool of free HID pointer ids in [0, NumberOfSimultaniousTouches), so each
+        // live finger gets a stable, collision-free id for its whole lifetime.
+        private readonly Stack<uint> freePointerIds = new Stack<uint>();
         private readonly object touchLock = new object();
+
+        private sealed class LiveContact
+        {
+            public uint PointerId;
+            public PointerTouchInfo Info;
+            public bool DownInjected;
+        }
 
         public void Init()
         {
-            this.registeredTouches = new Dictionary<uint, PointerTouchInfo>();
-            this.injectedIds = new HashSet<uint>();
+            for (int i = NumberOfSimultaniousTouches - 1; i >= 0; i--)
+                this.freePointerIds.Push((uint)i);
 #if DEBUG
             this.debuginfo = new StringBuilder();
 #endif
-            this.touch.PointerInfo.pointerType = PointerInputType.TOUCH;
-            this.touch.Orientation = 90;
-            this.touch.Pressure = 32000;
-            this.touch.TouchMasks = TouchMask.CONTACTAREA | TouchMask.ORIENTATION | TouchMask.PRESSURE;
 
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Create native window with handle... ");
+            Debug.Write($"{DateTime.Now}: Create native window with handle... ");
             this.window = new NativeWindow();
             this.window.CreateHandle(new CreateParams());
-            System.Diagnostics.Debug.WriteLine($"[OK]");
+            Debug.WriteLine($"[OK]");
 
             // Create a target for surface input
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Create contact target... ");
+            Debug.Write($"{DateTime.Now}: Create contact target... ");
             this.ContactTarget = new ContactTarget(IntPtr.Zero, EventThreadChoice.OnBackgroundThread);
             this.ContactTarget.EnableInput();
-            System.Diagnostics.Debug.WriteLine($"[OK]");
-
-            // Init the InputSimulator
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Init input simulatOr... ");
-            this.inputSimulator = new InputSimulator();
-            System.Diagnostics.Debug.WriteLine($"[OK]");
+            Debug.WriteLine($"[OK]");
 
             // Initialize the TouchInjector
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Init touch injector... ");
+            Debug.Write($"{DateTime.Now}: Init touch injector... ");
             bool s = TouchInjector.InitializeTouchInjection(NumberOfSimultaniousTouches, TouchFeedback.DEFAULT);
-            if (s) System.Diagnostics.Debug.WriteLine($"[OK]");
+            if (s) Debug.WriteLine($"[OK]");
             else
             {
-                System.Diagnostics.Debug.WriteLine($"[FAILED]");
+                Debug.WriteLine($"[FAILED]");
                 return;
             }
 
@@ -68,100 +87,42 @@ namespace PixelSenseToTouchLib
 
         public void InitEventHandlers()
         {
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Setting up event handlers... ");
+            Debug.Write($"{DateTime.Now}: Setting up event handlers... ");
             this.ContactTarget.ContactAdded += this.HandleAdd;
             this.ContactTarget.ContactChanged += this.HandleChange;
             this.ContactTarget.ContactRemoved += this.HandleRemove;
-            this.ContactTarget.ContactTapGesture += this.HandleTap;
-            this.ContactTarget.ContactHoldGesture += this.HandleHold;
-
-            System.Diagnostics.Debug.WriteLine($"[OK]");
+            Debug.WriteLine($"[OK]");
         }
 
         public void RemoveEventHandlers()
         {
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Removing event handlers... ");
+            Debug.Write($"{DateTime.Now}: Removing event handlers... ");
             this.ContactTarget.ContactAdded -= this.HandleAdd;
             this.ContactTarget.ContactChanged -= this.HandleChange;
             this.ContactTarget.ContactRemoved -= this.HandleRemove;
-            this.ContactTarget.ContactTapGesture -= this.HandleTap;
-            this.ContactTarget.ContactHoldGesture -= this.HandleHold;
-            System.Diagnostics.Debug.WriteLine($"[OK]");
+            Debug.WriteLine($"[OK]");
         }
 
-        private void TransformToSimulatorCoords(ref float x, ref float y)
+        private static PointerTouchInfo CreatePointer(uint pointerId, Contact contact)
         {
-            int w = Screen.PrimaryScreen.Bounds.Width;
-            int h = Screen.PrimaryScreen.Bounds.Height;
-            x = (65535.0f * (x / w)) + 0.5f;
-            y = (65535.0f * (y / h)) + 0.5f;
+            var info = new PointerTouchInfo();
+            info.PointerInfo.pointerType = PointerInputType.TOUCH;
+            info.PointerInfo.PointerId = pointerId;
+            info.TouchMasks = TouchMask.CONTACTAREA | TouchMask.ORIENTATION | TouchMask.PRESSURE;
+            info.Orientation = 90;
+            info.Pressure = 32000;
+            FillGeometry(ref info, contact);
+            return info;
         }
 
-        private void UpdateTouches(uint touchIdFromLatestEvent)
+        private static void FillGeometry(ref PointerTouchInfo info, Contact contact)
         {
-            lock (touchLock)
-            {
-                var arr = this.registeredTouches.Values.ToArray();
-                // For each registered touch, check whether we already injected the touch.
-                // If not, we flag that the touch has been injected.
-                // If yes, we make sure that the point flag is set to UPDATE instead of NEW
-                
-                // Why do we do this? We want to leverage the functionality provided by the Surface SDK 1.0 for
-                // raising events on tap and hold. We don't want to inject any touch events when a user
-                // touches the screen with one finger and triggers the ContactAdded-event.
-                // However, we *do* need to remember that a touch event occurred, for the situation
-                // that a user touches the screen with an additional finger. In that situation, when the
-                // user would then initiate a pinch event, that event would fail if we don't remember
-                // the first finger and inject that event anyway.
-                // What happens if we don't use this approach? the user *can* pinch, but only if the first
-                // finger moves around a little bit to trigger a ContactChange event, before touching the screen
-                // with another finger, wait and then initiate the pinch movement.
-                for (var i = 0; i < arr.Length; i++)
-                {
-                    var id = arr[i].PointerInfo.PointerId;
-                    if (!this.injectedIds.Contains(id))
-                    {
-                        this.injectedIds.Add(id);
-                    }
-                    else
-                    {
-                        arr[i].PointerInfo.PointerFlags = PointerFlags.UPDATE | PointerFlags.INRANGE | PointerFlags.INCONTACT;
-                    }
-                    if (id == touchIdFromLatestEvent) continue;
-                }
-                TouchInjector.InjectTouchInput(this.registeredTouches.Count, arr);
-            }
-        }
-
-        private uint SetPointerInfo(Contact contact)
-        {
-            var x = contact.X;
-            var y = contact.Y;
-            var id = (uint)(contact.Id % NumberOfSimultaniousTouches);
-
-            this.touch.PointerInfo.PointerId = id;
-
-            this.touch.PointerInfo.PtPixelLocation.X = (int)x;
-            this.touch.PointerInfo.PtPixelLocation.Y = (int)y;
-            this.touch.ContactArea.left = (int)contact.Bounds.Left;
-            this.touch.ContactArea.right = (int)contact.Bounds.Right;
-            this.touch.ContactArea.top = (int)contact.Bounds.Top;
-            this.touch.ContactArea.bottom = (int)contact.Bounds.Bottom;
-
-            this.touch.PointerInfo.PointerFlags = PointerFlags.DOWN | PointerFlags.INRANGE | PointerFlags.INCONTACT;
-            System.Diagnostics.Debug.WriteLine($"New! {id}, {contact.CenterX},{contact.CenterY}\n");
-
-            if (this.registeredTouches.ContainsKey(id))
-            {
-                this.registeredTouches.Remove(id);
-                this.registeredTouches.Add(id, this.touch);
-            }
-            else
-            {
-                this.registeredTouches.Add(id, this.touch);
-            }
-
-            return id;
+            info.PointerInfo.PtPixelLocation.X = (int)contact.X;
+            info.PointerInfo.PtPixelLocation.Y = (int)contact.Y;
+            info.ContactArea.left = (int)contact.Bounds.Left;
+            info.ContactArea.right = (int)contact.Bounds.Right;
+            info.ContactArea.top = (int)contact.Bounds.Top;
+            info.ContactArea.bottom = (int)contact.Bounds.Bottom;
         }
 
         private void HandleAdd(object sender, ContactEventArgs e)
@@ -169,9 +130,22 @@ namespace PixelSenseToTouchLib
             var contact = e.Contact;
             if (!contact.IsFingerRecognized) return;
 
-            this.SetPointerInfo(contact);
+            lock (this.touchLock)
+            {
+                if (this.liveContacts.ContainsKey(contact.Id) || this.freePointerIds.Count == 0) return;
 
-            // Do *not* update touches on add! We only store the info for when another touch is detected! Then we might need to support pinching and stuff
+                var pointerId = this.freePointerIds.Pop();
+                this.liveContacts[contact.Id] = new LiveContact
+                {
+                    PointerId = pointerId,
+                    Info = CreatePointer(pointerId, contact),
+                    DownInjected = false
+                };
+#if DEBUG
+                this.debuginfo.Append($"New! {pointerId}, {contact.CenterX},{contact.CenterY}\n");
+#endif
+                this.InjectFrame();
+            }
         }
 
         private void HandleChange(object sender, ContactEventArgs e)
@@ -179,72 +153,99 @@ namespace PixelSenseToTouchLib
             var contact = e.Contact;
             if (!contact.IsFingerRecognized) return;
 
-            var id = this.SetPointerInfo(contact);
-
-            this.UpdateTouches(id);
+            lock (this.touchLock)
+            {
+                LiveContact lc;
+                if (!this.liveContacts.TryGetValue(contact.Id, out lc))
+                {
+                    // A change before we saw the add: register it now so the pointer
+                    // still goes down.
+                    if (this.freePointerIds.Count == 0) return;
+                    var pointerId = this.freePointerIds.Pop();
+                    this.liveContacts[contact.Id] = new LiveContact
+                    {
+                        PointerId = pointerId,
+                        Info = CreatePointer(pointerId, contact),
+                        DownInjected = false
+                    };
+                }
+                else
+                {
+                    var info = lc.Info;
+                    FillGeometry(ref info, contact);
+                    lc.Info = info;
+                }
+                this.InjectFrame();
+            }
         }
 
         private void HandleRemove(object sender, ContactEventArgs e)
         {
             var contact = e.Contact;
-            if (!e.Contact.IsFingerRecognized) return;
 
-            var x = contact.X;
-            var y = contact.Y;
-            var id = (uint)(contact.Id % NumberOfSimultaniousTouches);
+            lock (this.touchLock)
+            {
+                LiveContact lc;
+                // Release whatever we actually injected for this contact, regardless of
+                // its current IsFingerRecognized state (it can flip on the way up).
+                if (!this.liveContacts.TryGetValue(contact.Id, out lc)) return;
 
-            this.touch.PointerInfo.PointerFlags = PointerFlags.UP;
-            this.touch.PointerInfo.PointerId = id;
-
-            this.touch.PointerInfo.PtPixelLocation.X = (int)x;
-            this.touch.PointerInfo.PtPixelLocation.Y = (int)y;
-            if (this.registeredTouches.ContainsKey(id)) this.registeredTouches.Remove(id);
-            if (this.injectedIds.Contains(id)) this.injectedIds.Remove(id);
+                // Inject the UP while the contact is still part of the frame, then retire
+                // it and reclaim its pointer id.
+                this.InjectFrame(contact.Id);
+                this.liveContacts.Remove(contact.Id);
+                this.freePointerIds.Push(lc.PointerId);
 #if DEBUG
-            this.debuginfo.Append($"Weg! {id}, {contact.CenterX},{contact.CenterY}\n");
+                this.debuginfo.Append($"Weg! {lc.PointerId}, {contact.CenterX},{contact.CenterY}\n");
 #endif
-
-            this.UpdateTouches(id);
+            }
         }
 
-        private void HandleTap(object sender, ContactEventArgs e)
+        // Injects the complete set of live contacts in a single call. Caller holds
+        // touchLock. Windows requires every InjectTouchInput call to carry all contacts
+        // currently down: a finger held still is re-sent as UPDATE so it survives while
+        // another finger moves, and the contact identified by removingId (if any) is
+        // flagged UP.
+        private void InjectFrame(int removingId = -1)
         {
-            var contact = e.Contact;
+            if (this.liveContacts.Count == 0) return;
 
-            var x = contact.CenterX;
-            var y = contact.CenterY;
-            var id = (uint)(contact.Id % NumberOfSimultaniousTouches);
-            this.TransformToSimulatorCoords(ref x, ref y);
+            var frame = new PointerTouchInfo[this.liveContacts.Count];
+            int i = 0;
+            foreach (var kv in this.liveContacts)
+            {
+                var lc = kv.Value;
+                var info = lc.Info;
 
-            if (this.registeredTouches.ContainsKey(id)) this.registeredTouches.Remove(id);
-            if (this.injectedIds.Contains(id)) this.injectedIds.Remove(id);
+                if (kv.Key == removingId)
+                {
+                    info.PointerInfo.PointerFlags = PointerFlags.UP;
+                }
+                else if (!lc.DownInjected)
+                {
+                    info.PointerInfo.PointerFlags = PointerFlags.DOWN | PointerFlags.INRANGE | PointerFlags.INCONTACT;
+                    lc.DownInjected = true;
+                }
+                else
+                {
+                    info.PointerInfo.PointerFlags = PointerFlags.UPDATE | PointerFlags.INRANGE | PointerFlags.INCONTACT;
+                }
 
-            this.inputSimulator.Mouse.MoveMouseToPositionOnVirtualDesktop(x, y).LeftButtonDown().Sleep(50).LeftButtonUp();
-        }
+                lc.Info = info;
+                frame[i++] = info;
+            }
 
-        private void HandleHold(object sender, ContactEventArgs e)
-        {
-            var contact = e.Contact;
-
-            var x = contact.CenterX;
-            var y = contact.CenterY;
-            var id = (uint)(contact.Id % NumberOfSimultaniousTouches);
-            this.TransformToSimulatorCoords(ref x, ref y);
-
-            if (this.registeredTouches.ContainsKey(id)) this.registeredTouches.Remove(id);
-            if (this.injectedIds.Contains(id)) this.injectedIds.Remove(id);
-
-            this.inputSimulator.Mouse.MoveMouseToPositionOnVirtualDesktop(x, y).RightButtonClick();
+            TouchInjector.InjectTouchInput(frame.Length, frame);
         }
 
         public void CleanUp()
         {
-            System.Diagnostics.Debug.Write($"{DateTime.Now}: Start disposing resources... ");
+            Debug.Write($"{DateTime.Now}: Start disposing resources... ");
             this.ContactTarget?.Dispose();
-            System.Diagnostics.Debug.Write($"ContactTarget;");
+            Debug.Write($"ContactTarget;");
 
             this.window?.DestroyHandle();
-            System.Diagnostics.Debug.Write($"Window;");
+            Debug.Write($"Window;");
         }
 
         void IDisposable.Dispose()
