@@ -45,6 +45,13 @@ namespace PixelSenseToTouchLib
         private readonly Stack<uint> freePointerIds = new Stack<uint>();
         private readonly object touchLock = new object();
 
+        // Reusable inject buffer + a snapshot of the last frame actually sent: InjectFrame
+        // allocates nothing per contact event (no GC churn under active touch), and skips the
+        // InjectTouchInput syscall when the frame is unchanged (a held/still finger).
+        private readonly PointerTouchInfo[] injectBuffer = new PointerTouchInfo[NumberOfSimultaniousTouches];
+        private readonly PointerTouchInfo[] lastSent = new PointerTouchInfo[NumberOfSimultaniousTouches];
+        private int lastSentCount = -1;
+
         private sealed class LiveContact
         {
             public uint PointerId;
@@ -208,9 +215,13 @@ namespace PixelSenseToTouchLib
         // flagged UP.
         private void InjectFrame(int removingId = -1)
         {
-            if (this.liveContacts.Count == 0) return;
+            int count = this.liveContacts.Count;
+            if (count == 0)
+            {
+                this.lastSentCount = -1;   // all fingers up: force the next frame to inject
+                return;
+            }
 
-            var frame = new PointerTouchInfo[this.liveContacts.Count];
             int i = 0;
             foreach (var kv in this.liveContacts)
             {
@@ -232,10 +243,45 @@ namespace PixelSenseToTouchLib
                 }
 
                 lc.Info = info;
-                frame[i++] = info;
+                this.injectBuffer[i++] = info;   // reuse the buffer; no per-event allocation
             }
 
-            TouchInjector.InjectTouchInput(frame.Length, frame);
+            // Skip the InjectTouchInput syscall when this frame is identical to the one we last
+            // sent. A held/still finger makes SurfaceInput re-fire ContactChanged with unchanged
+            // geometry, and re-injecting an identical frame is pure overhead. A real DOWN/UP
+            // always changes the pointer set or a flag, so it is never skipped.
+            if (this.FrameEqualsLast(count)) return;
+
+            TouchInjector.InjectTouchInput(count, this.injectBuffer);
+
+            Array.Copy(this.injectBuffer, this.lastSent, count);
+            this.lastSentCount = count;
+        }
+
+        // True if injectBuffer[0..count) matches the last frame actually injected. Exact
+        // element-wise compare of the geometry + flags: the dictionary's enumeration order is
+        // stable between two consecutive frames with no add/remove, so equal content compares
+        // equal; if an add/remove reordered it, we simply do not skip (a harmless extra inject).
+        private bool FrameEqualsLast(int count)
+        {
+            if (this.lastSentCount != count) return false;
+            for (int i = 0; i < count; i++)
+            {
+                var a = this.injectBuffer[i];
+                var b = this.lastSent[i];
+                if (a.PointerInfo.PointerId != b.PointerInfo.PointerId ||
+                    a.PointerInfo.PointerFlags != b.PointerInfo.PointerFlags ||
+                    a.PointerInfo.PtPixelLocation.X != b.PointerInfo.PtPixelLocation.X ||
+                    a.PointerInfo.PtPixelLocation.Y != b.PointerInfo.PtPixelLocation.Y ||
+                    a.ContactArea.left != b.ContactArea.left ||
+                    a.ContactArea.right != b.ContactArea.right ||
+                    a.ContactArea.top != b.ContactArea.top ||
+                    a.ContactArea.bottom != b.ContactArea.bottom)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         public void CleanUp()
