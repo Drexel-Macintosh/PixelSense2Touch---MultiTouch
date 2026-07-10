@@ -8,8 +8,6 @@
 
 # PixelSense2Touch — Surface1-Hydra-x64 fork
 
-Adds Windows 10/11 multi-touch to the Microsoft Surface 1.0 (PixelSense) table. This fork is maintained as part of the **[Surface1-Hydra-x64](https://github.com/Drexel-Macintosh)** project — a from-scratch x64 driver that revives the 2008 Surface 1.0 vision hardware on Windows 11 — and is validated on real hardware.
-
 ## What this fork changes (vs. upstream v2.0)
 
 - **Robust simultaneous multi-touch.** Every Surface contact is injected as a real Windows touch pointer and the full live set is re-injected each event, so Windows does its own gestures (tap → click, press-and-hold → right-click, drag, pinch/zoom). This fixes three defects that made the previous build effectively single-touch: a stuck/ghost pointer on finger-up, cross-thread corruption of the shared pointer, and pointer-id collisions (`id % 20`). See the upstream PR for the full write-up.
