@@ -37,7 +37,7 @@ namespace PixelSense2Touch
             this.notifyIcon = new NotifyIcon(this.components)
             {
                 Icon = new System.Drawing.Icon("trayicon.ico"),
-                Text = "PixelSense2Touch",
+                Text = "Hydra Touch",
                 Visible = true
             };
 
@@ -98,8 +98,12 @@ namespace PixelSense2Touch
 		}
 
 		private void HandleAboutRequest(object sender, EventArgs e) {
-			// TODO: Remove hardcoded string here
-			MessageBox.Show("Surface2Touch created by Boaz Pat-El (http://www.boazpatel.com).\nVersion: 2.0 (Jul 2020)\n\nSee https://github.com/Heer-Boaz/PixelSense2Touch for latest version and details.", "About Surface2Touch", MessageBoxButtons.OK, MessageBoxIcon.Information);
+			MessageBox.Show(
+				"Hydra Touch - Surface 1.0 (PixelSense) to Windows touch bridge.\n\n" +
+				"Multi-touch fork for the Surface1-Hydra-x64 project, built on PixelSense2Touch " +
+				"by Boaz Pat-El (MIT license, http://www.boazpatel.com, " +
+				"https://github.com/Heer-Boaz/PixelSense2Touch).",
+				"About Hydra Touch", MessageBoxButtons.OK, MessageBoxIcon.Information);
 		}
 
 #if DEBUG

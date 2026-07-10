@@ -1,3 +1,32 @@
+# ⬇️ Download the ready-to-run build (Surface1-Hydra-x64)
+
+**[HydraTouch-PixelSenseToTouch-x64.zip](https://github.com/Drexel-Macintosh/PixelSense2Touch---MultiTouch/releases/latest/download/HydraTouch-PixelSenseToTouch-x64.zip)** — the working, validated build from this fork. Unzip, read the included `README.txt`, run it over Surface Input. (Everything it needs is in the zip.)
+
+> This fork's improvements are also proposed **upstream** as a pull request to [Heer-Boaz/PixelSense2Touch](https://github.com/Heer-Boaz/PixelSense2Touch). This download exists so the working build is available even if upstream hasn't merged or released it yet.
+
+---
+
+# PixelSense2Touch — Surface1-Hydra-x64 fork
+
+Adds Windows 10/11 multi-touch to the Microsoft Surface 1.0 (PixelSense) table. This fork is maintained as part of the **[Surface1-Hydra-x64](https://github.com/Drexel-Macintosh)** project — a from-scratch x64 driver that revives the 2008 Surface 1.0 vision hardware on Windows 11 — and is validated on real hardware.
+
+## What this fork changes (vs. upstream v2.0)
+
+- **Robust simultaneous multi-touch.** Every Surface contact is injected as a real Windows touch pointer and the full live set is re-injected each event, so Windows does its own gestures (tap → click, press-and-hold → right-click, drag, pinch/zoom). This fixes three defects that made the previous build effectively single-touch: a stuck/ghost pointer on finger-up, cross-thread corruption of the shared pointer, and pointer-id collisions (`id % 20`). See the upstream PR for the full write-up.
+- **Leaner runtime.** The touch frame is built into a reusable buffer (no per-event allocation / GC churn), and an unchanged frame is not re-sent (a held-still finger no longer re-fires an identical inject). Same behavior, lower CPU — measurable on the original Core2Duo table.
+- **Built x86** to match the 32-bit Surface runtime it talks to.
+- **Dropped the unused `InputSimulatorStandard` dependency** — real touch pointers make Windows generate gestures natively, so the old mouse-emulation path is gone.
+- **"Hydra Touch" branding** (tray/app icon + name) for the Surface1-Hydra-x64 distribution. Icon/name only — touch behavior is identical.
+
+## Install / Update / Uninstall
+
+Full step-by-step instructions are in **`README.txt` inside the download**. In short: this app is a *bridge* on top of "Surface Input", so the table must already have the Hydra x64 camera driver, the Surface 1.0 runtime, and calibration installed (see the Surface1-Hydra-x64 project's install guide for that one-time setup). Then run **Surface Input** (`/r Surface`, as administrator) first, and **PixelSenseToTouch** (as administrator) second.
+
+---
+---
+
+*The original upstream README (by Boaz Pat-El) follows.*
+
 # Latest version binary download
 https://github.com/Heer-Boaz/PixelSense2Touch/releases/tag/v2.0
 
