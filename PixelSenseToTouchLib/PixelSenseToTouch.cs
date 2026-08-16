@@ -31,7 +31,18 @@ namespace PixelSenseToTouchLib
     public class PixelSenseToTouch : IDisposable
     {
         public ContactTarget ContactTarget { get; set; }
-        private const int NumberOfSimultaniousTouches = 20;
+        // Match the Surface/PixelSense hardware maximum (also the HydraTouch digitizer's declared max),
+        // so Windows reports the true contact ceiling instead of an arbitrary lower cap.
+        private const int NumberOfSimultaniousTouches = 52;
+
+        // True while the contact handlers are attached and injecting. Always read/written under
+        // touchLock; the handlers test it so a callback already in flight when we detach cannot
+        // resurrect a contact after LiftAll has released everything.
+        public bool IsRunning { get; private set; }
+
+        // InitializeTouchInjection succeeded. Without it InjectTouchInput can never work, so
+        // attaching the handlers would only pretend to be running.
+        private bool injectorReady;
 
         private NativeWindow window;
 #if DEBUG
@@ -80,8 +91,8 @@ namespace PixelSenseToTouchLib
 
             // Initialize the TouchInjector
             Debug.Write($"{DateTime.Now}: Init touch injector... ");
-            bool s = TouchInjector.InitializeTouchInjection(NumberOfSimultaniousTouches, TouchFeedback.DEFAULT);
-            if (s) Debug.WriteLine($"[OK]");
+            this.injectorReady = TouchInjector.InitializeTouchInjection(NumberOfSimultaniousTouches, TouchFeedback.DEFAULT);
+            if (this.injectorReady) Debug.WriteLine($"[OK]");
             else
             {
                 Debug.WriteLine($"[FAILED]");
@@ -92,8 +103,18 @@ namespace PixelSenseToTouchLib
             this.InitEventHandlers();
         }
 
+        // Attach the contact handlers and begin injecting. Idempotent: the tray reconciles state on a
+        // timer, so this is called repeatedly and must no-op when already running.
         public void InitEventHandlers()
         {
+            if (!this.injectorReady || this.ContactTarget == null) return;
+
+            lock (this.touchLock)
+            {
+                if (this.IsRunning) return;
+                this.IsRunning = true;
+            }
+
             Debug.Write($"{DateTime.Now}: Setting up event handlers... ");
             this.ContactTarget.ContactAdded += this.HandleAdd;
             this.ContactTarget.ContactChanged += this.HandleChange;
@@ -101,13 +122,55 @@ namespace PixelSenseToTouchLib
             Debug.WriteLine($"[OK]");
         }
 
+        // Detach the contact handlers and stop injecting. Idempotent, and safe to call with fingers
+        // on the glass: clearing IsRunning first shuts the handlers up, then LiftAll releases whatever
+        // was still down. Unsubscribing alone would strand those pointers DOWN in Windows forever.
         public void RemoveEventHandlers()
         {
+            lock (this.touchLock)
+            {
+                if (!this.IsRunning) return;
+                this.IsRunning = false;
+            }
+
             Debug.Write($"{DateTime.Now}: Removing event handlers... ");
             this.ContactTarget.ContactAdded -= this.HandleAdd;
             this.ContactTarget.ContactChanged -= this.HandleChange;
             this.ContactTarget.ContactRemoved -= this.HandleRemove;
             Debug.WriteLine($"[OK]");
+
+            this.LiftAll();
+        }
+
+        // Release every pointer we currently hold down, in one frame, and reclaim its id.
+        // Only contacts whose DOWN we actually injected are included - Windows must never see an UP
+        // for a pointer that was never down.
+        public void LiftAll()
+        {
+            lock (this.touchLock)
+            {
+                if (this.liveContacts.Count == 0) return;
+
+                int count = 0;
+                foreach (var kv in this.liveContacts)
+                {
+                    var lc = kv.Value;
+                    this.freePointerIds.Push(lc.PointerId);
+                    if (!lc.DownInjected) continue;
+
+                    var info = lc.Info;
+                    info.PointerInfo.PointerFlags = PointerFlags.UP;
+                    this.injectBuffer[count++] = info;
+                }
+                this.liveContacts.Clear();
+                this.lastSentCount = -1;   // next frame must inject; nothing is down now
+
+                if (count > 0)
+                {
+                    Debug.WriteLine($"{DateTime.Now}: LiftAll - releasing {count} pointer(s).");
+                    TouchInjector.InjectTouchInput(count, this.injectBuffer);
+                }
+            }
         }
 
         private static PointerTouchInfo CreatePointer(uint pointerId, Contact contact)
@@ -139,6 +202,7 @@ namespace PixelSenseToTouchLib
 
             lock (this.touchLock)
             {
+                if (!this.IsRunning) return;   // detached (or suspended) while this callback was in flight
                 if (this.liveContacts.ContainsKey(contact.Id) || this.freePointerIds.Count == 0) return;
 
                 var pointerId = this.freePointerIds.Pop();
@@ -162,6 +226,8 @@ namespace PixelSenseToTouchLib
 
             lock (this.touchLock)
             {
+                if (!this.IsRunning) return;   // detached (or suspended) while this callback was in flight
+
                 LiveContact lc;
                 if (!this.liveContacts.TryGetValue(contact.Id, out lc))
                 {
@@ -192,6 +258,8 @@ namespace PixelSenseToTouchLib
 
             lock (this.touchLock)
             {
+                if (!this.IsRunning) return;   // detached: LiftAll has already released everything
+
                 LiveContact lc;
                 // Release whatever we actually injected for this contact, regardless of
                 // its current IsFingerRecognized state (it can flip on the way up).
@@ -286,6 +354,10 @@ namespace PixelSenseToTouchLib
 
         public void CleanUp()
         {
+            // Detach + release before tearing anything down: exiting with a finger on the glass would
+            // otherwise leave that pointer stuck DOWN in Windows after the process is gone.
+            this.RemoveEventHandlers();
+
             Debug.Write($"{DateTime.Now}: Start disposing resources... ");
             this.ContactTarget?.Dispose();
             Debug.Write($"ContactTarget;");
