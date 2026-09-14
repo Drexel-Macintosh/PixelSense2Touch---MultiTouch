@@ -33,5 +33,9 @@ using System.Runtime.InteropServices;
 // You can specify all the values or you can default the Build and Revision Numbers
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("2.1.2.0")]
-[assembly: AssemblyFileVersion("2.1.2.0")]
+// 2.2.0.0 adds the pluggable output sink (HydraTouch HID digitizer, falling back to touch
+// injection). Bumped so the staged binary cannot be confused with the inject-only 2.1.1.0 build.
+// 2.3.0.0 adds the IdleMask contact hint (HydraIdleHint -> IOCTL 2108 on the HydraX64Beta
+// driver). Bumped past the staged sink-only 2.2.0.0 for the same reason.
+[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyFileVersion("2.3.0.0")]

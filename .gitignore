@@ -262,3 +262,6 @@ __pycache__/
 /Debugger
 /.vscode
 /lib
+
+# Local no-VS build output (build.ps1); staged copies live in the Surface1-Hydra-x64 repo
+/build-out

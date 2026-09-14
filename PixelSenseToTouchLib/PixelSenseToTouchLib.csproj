@@ -71,6 +71,10 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="HidDigitizerSink.cs" />
+    <Compile Include="HydraIdleHint.cs" />
+    <Compile Include="InjectTouchSink.cs" />
+    <Compile Include="ITouchSink.cs" />
     <Compile Include="PixelSenseToTouch.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

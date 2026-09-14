@@ -16,6 +16,12 @@ namespace PixelSenseToTouchLib
     // pointers reach Windows, the OS performs gesture recognition itself (tap = click,
     // press-and-hold = right-click, drag, pinch/zoom), so no mouse emulation is needed.
     //
+    // How a finished frame reaches Windows is a pluggable last step - see ITouchSink. Where the
+    // HydraTouch HID digitizer is installed it is used in preference to InjectTouchInput, because
+    // injected input is blocked by UIPI from elevated windows and never reaches the UAC secure
+    // desktop, whereas kernel HID reports reach both. Everything above the sink - contact tracking,
+    // pointer-id assignment, frame assembly, the held-frame skip - is identical either way.
+    //
     // This replaces the earlier model that injected touch only for multi-finger cases
     // and emulated single-finger clicks via the Surface tap/hold gesture events + a
     // mouse simulator. That model had three defects that made real multi-touch
@@ -40,9 +46,24 @@ namespace PixelSenseToTouchLib
         // resurrect a contact after LiftAll has released everything.
         public bool IsRunning { get; private set; }
 
-        // InitializeTouchInjection succeeded. Without it InjectTouchInput can never work, so
-        // attaching the handlers would only pretend to be running.
-        private bool injectorReady;
+        // The started output sink - the HID digitizer, or touch injection. Null means none could be
+        // started, so attaching the handlers would only pretend to be running.
+        private ITouchSink sink;
+
+        // Which sink to prefer. Set before Init(); Auto defers to the PIXELSENSETOUCH_SINK
+        // environment variable and otherwise prefers the digitizer.
+        public TouchSinkMode SinkMode { get; set; }
+
+        // How sink selection actually went - surfaced by the tray, because the difference between
+        // the two sinks is the difference between touch working on a UAC prompt and not.
+        public string SinkDetail { get; private set; }
+        public string SinkName { get { return this.sink == null ? null : this.sink.Name; } }
+        public bool SinkReachesElevated { get { return this.sink != null && this.sink.ReachesElevated; } }
+
+        // Occupancy hint for the driver's IdleMask gate (see HydraIdleHint). Lives for the whole
+        // life of the ContactTarget, independent of the injection handlers and of the sink.
+        public HydraIdleHint IdleHint { get; private set; }
+        public string IdleHintStatus { get { return this.IdleHint?.Status ?? "idle hint: off: not started"; } }
 
         private NativeWindow window;
 #if DEBUG
@@ -86,18 +107,41 @@ namespace PixelSenseToTouchLib
             // Create a target for surface input
             Debug.Write($"{DateTime.Now}: Create contact target... ");
             this.ContactTarget = new ContactTarget(IntPtr.Zero, EventThreadChoice.OnBackgroundThread);
+            Debug.WriteLine($"[OK]");
+
+            // Contact-count hint for the driver's IdleMask gate. Attached BEFORE input is enabled:
+            // anything the runtime already tracks (a tag on the table, a finger held through a
+            // restart) arrives in the very first frames as ContactChanged, and the hint must count
+            // it before it may ever report an empty table. Attached apart from the injection
+            // handlers: RemoveEventHandlers (Shell suspend / Stop) detaches only those, so the driver
+            // keeps getting a true count while injection is off. Inert unless the HydraX64Beta
+            // IdleMask driver is installed and we run elevated - see HydraIdleHint.
+            Debug.Write($"{DateTime.Now}: Attaching idle hint... ");
+            this.IdleHint = new HydraIdleHint();
+            this.IdleHint.Attach(this.ContactTarget);
+            Debug.WriteLine($"[OK]");
+
+            Debug.Write($"{DateTime.Now}: Enable input... ");
             this.ContactTarget.EnableInput();
             Debug.WriteLine($"[OK]");
 
-            // Initialize the TouchInjector
-            Debug.Write($"{DateTime.Now}: Init touch injector... ");
-            this.injectorReady = TouchInjector.InitializeTouchInjection(NumberOfSimultaniousTouches, TouchFeedback.DEFAULT);
-            if (this.injectorReady) Debug.WriteLine($"[OK]");
-            else
-            {
-                Debug.WriteLine($"[FAILED]");
-                return;
-            }
+            // Open the driver and probe 2108 support. The first real count goes out with the
+            // runtime's first frame; until then the hint says "occupied", never "empty".
+            Debug.Write($"{DateTime.Now}: Opening idle hint... ");
+            this.IdleHint.Open();
+            Debug.WriteLine($"[{this.IdleHint.Status}]");
+
+            // Choose and start the output sink. The HID digitizer is preferred wherever it is
+            // installed: it is the only path whose input crosses UIPI and the secure desktop, so it
+            // is the difference between touch working on an elevated window or a UAC prompt and not.
+            // Without it we fall back to injection and behave exactly as this app always has.
+            Debug.Write($"{DateTime.Now}: Selecting touch sink... ");
+            if (this.SinkMode == TouchSinkMode.Auto) this.SinkMode = TouchSink.ModeFromEnvironment();
+            string detail;
+            this.sink = TouchSink.Select(this.SinkMode, NumberOfSimultaniousTouches, out detail);
+            this.SinkDetail = detail;
+            Debug.WriteLine(this.sink != null ? $"[OK] {detail}" : $"[FAILED] {detail}");
+            if (this.sink == null) return;
 
             // Setup event handlers
             this.InitEventHandlers();
@@ -107,7 +151,7 @@ namespace PixelSenseToTouchLib
         // timer, so this is called repeatedly and must no-op when already running.
         public void InitEventHandlers()
         {
-            if (!this.injectorReady || this.ContactTarget == null) return;
+            if (this.sink == null || this.ContactTarget == null) return;
 
             lock (this.touchLock)
             {
@@ -165,10 +209,10 @@ namespace PixelSenseToTouchLib
                 this.liveContacts.Clear();
                 this.lastSentCount = -1;   // next frame must inject; nothing is down now
 
-                if (count > 0)
+                if (count > 0 && this.sink != null)
                 {
                     Debug.WriteLine($"{DateTime.Now}: LiftAll - releasing {count} pointer(s).");
-                    TouchInjector.InjectTouchInput(count, this.injectBuffer);
+                    this.sink.Send(count, this.injectBuffer);
                 }
             }
         }
@@ -320,7 +364,7 @@ namespace PixelSenseToTouchLib
             // always changes the pointer set or a flag, so it is never skipped.
             if (this.FrameEqualsLast(count)) return;
 
-            TouchInjector.InjectTouchInput(count, this.injectBuffer);
+            this.sink.Send(count, this.injectBuffer);
 
             Array.Copy(this.injectBuffer, this.lastSent, count);
             this.lastSentCount = count;
@@ -359,11 +403,24 @@ namespace PixelSenseToTouchLib
             this.RemoveEventHandlers();
 
             Debug.Write($"{DateTime.Now}: Start disposing resources... ");
+            // The hint sends one goodbye on the way out (HYDRA_IDLE_HINT_FLAG_GOODBYE) so the driver
+            // can drop it at once; a killed process cannot, and the driver's timeout turns a vanished
+            // sender into "not empty" by itself. Detached before the target it is subscribed to goes away.
+            this.IdleHint?.Dispose();
+            this.IdleHint = null;
+            Debug.Write($"IdleHint;");
+
             this.ContactTarget?.Dispose();
             Debug.Write($"ContactTarget;");
 
             this.window?.DestroyHandle();
             Debug.Write($"Window;");
+
+            // Last, so nothing can try to send through a disposed sink. The HID sink releases every
+            // contact as it closes, so a killed process cannot leave a finger stuck down in the driver.
+            this.sink?.Dispose();
+            this.sink = null;
+            Debug.Write($"Sink;");
         }
 
         void IDisposable.Dispose()

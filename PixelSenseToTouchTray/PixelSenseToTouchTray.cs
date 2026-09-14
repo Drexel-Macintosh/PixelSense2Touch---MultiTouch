@@ -3,7 +3,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using PixelSenseToTouchLib;
+using Mutex = System.Threading.Mutex;
 
 namespace PixelSense2Touch
 {
@@ -25,6 +27,7 @@ namespace PixelSense2Touch
 		private NotifyIcon notifyIcon;
 		private ContextMenuStrip contextMenu;
 		private ToolStripMenuItem statusMenuItem;
+		private ToolStripMenuItem hintMenuItem;     // "idle hint: ..." read-out under the Touch line
 		private ToolStripMenuItem stopMenuItem;
 		private ToolStripMenuItem startMenuItem;
 		private ToolStripMenuItem watchShellMenuItem;
@@ -42,13 +45,56 @@ namespace PixelSense2Touch
 		private bool userWantsRunning = true;
 		private bool shellPresent;
 		private int shellAbsentPolls;
+		// The short touch status ApplyState last chose, kept so the tooltip can be re-composed with
+		// the idle-hint state without re-running the state machine.
+		private string shortStatus = "starting";
+		private readonly object shutdownLock = new object();
+
+		// One instance per session. A second copy would inject every finger twice and - worse -
+		// send its own IdleMask contact hints to the driver from a ContactTarget that has not seen
+		// the runtime's contacts yet, so it must never get as far as Init(). Held for the life of
+		// the process; the OS releases it when the process dies, so a crash cannot wedge the next start.
+		private static Mutex singleInstance;
 
 		[STAThread]
 		static void Main() {
-			Application.EnableVisualStyles();
-			Application.SetCompatibleTextRenderingDefault(false);
-			var oContext = new PixelSense2TouchTray();
-			Application.Run(oContext);
+			if (!ClaimSingleInstance()) return;
+			try {
+				Application.EnableVisualStyles();
+				Application.SetCompatibleTextRenderingDefault(false);
+				var oContext = new PixelSense2TouchTray();
+				Application.Run(oContext);
+			}
+			finally {
+				try { singleInstance.ReleaseMutex(); } catch { }
+				singleInstance.Dispose();
+			}
+		}
+
+		private static bool ClaimSingleInstance() {
+			int session = 0;
+			try { using (Process me = Process.GetCurrentProcess()) session = me.SessionId; } catch { }
+			string name = @"Global\PixelSenseToTouch-" + session;
+			bool createdNew;
+			try {
+				singleInstance = new Mutex(true, name, out createdNew);
+			}
+			catch (UnauthorizedAccessException) {
+				// The mutex exists but this copy may not open it (the first copy runs elevated and
+				// this one does not, or vice versa): another instance is running.
+				createdNew = false;
+			}
+			catch (Exception ex) {
+				// Cannot create the mutex at all (kernel-object namespace policy). Do not let that
+				// stop the app: run without the guard, as every version before 2.3 did.
+				Trace.WriteLine(DateTime.Now + ": PixelSenseToTouch: single-instance mutex " + name + " unavailable (" + ex.GetType().Name + ": " + ex.Message + ") - running unguarded.");
+				singleInstance = new Mutex();
+				return true;
+			}
+			if (createdNew) return true;
+			Trace.WriteLine(DateTime.Now + ": PixelSenseToTouch: another instance already runs in session " + session + " (" + name + " is held) - exiting without starting.");
+			if (singleInstance != null) singleInstance.Dispose();
+			return false;
 		}
 
 		public PixelSense2TouchTray() {
@@ -58,6 +104,15 @@ namespace PixelSense2Touch
 			this.SetupTrayMenu();
 			this.InitPixelSenseToTouch();
 			this.StartShellWatch();
+
+			// Every way out must reach CleanUp: it releases any pointer still down and sends the
+			// IdleMask goodbye hint. Exit (menu) calls it directly; ApplicationExit covers a message
+			// loop that ends for any other reason; SessionEnding covers logoff/shutdown, where Windows
+			// would otherwise just terminate the process (the driver's hint timeout then covers us,
+			// but 1.5 s later and with the pointers released only by the HID sink's close).
+			Application.ApplicationExit += new EventHandler(HandleApplicationExit);
+			try { SystemEvents.SessionEnding += new SessionEndingEventHandler(HandleSessionEnding); }
+			catch (Exception ex) { Debug.WriteLine($"{DateTime.Now}: SessionEnding hook unavailable: {ex.Message}"); }
 		}
 
 		// A bare filename resolves against Environment.CurrentDirectory, not the exe's folder, so
@@ -94,6 +149,7 @@ namespace PixelSense2Touch
 
             this.contextMenu = new ContextMenuStrip();
 			this.statusMenuItem = new ToolStripMenuItem();
+			this.hintMenuItem = new ToolStripMenuItem();
 			this.stopMenuItem = new ToolStripMenuItem();
 			this.startMenuItem = new ToolStripMenuItem();
 			this.watchShellMenuItem = new ToolStripMenuItem();
@@ -115,6 +171,11 @@ namespace PixelSense2Touch
 		private void SetupTrayMenu() {
 			this.statusMenuItem.Enabled = false;   // a read-out, not a command
 			this.contextMenu.Items.Add(this.statusMenuItem);
+			// The IdleMask contact hint (HydraIdleHint): on/off + live seq/count. Refreshed as the
+			// menu opens so the numbers are current; a read-out like the Touch line above it.
+			this.hintMenuItem.Enabled = false;
+			this.contextMenu.Items.Add(this.hintMenuItem);
+			this.contextMenu.Opening += new System.ComponentModel.CancelEventHandler(HandleMenuOpening);
 			this.contextMenu.Items.Add(new ToolStripSeparator());
 
 			this.startMenuItem.Text = "Start";
@@ -173,6 +234,11 @@ namespace PixelSense2Touch
 		}
 
 		private void HandleShellWatchTick(object sender, EventArgs e) {
+			if (this.pixelSenseToTouchProvider == null) { this.shellWatchTimer.Stop(); return; }   // shut down from another path
+			// Piggy-back on the 1 s poll to keep the hint read-out and tooltip current (the hint can
+			// turn off on its own if the driver goes away). Independent of the Shell logic below.
+			this.RefreshHintStatus();
+
 			if (!this.watchShellMenuItem.Checked) return;
 
 			if (IsShellRunning(this.sessionId)) {
@@ -197,11 +263,13 @@ namespace PixelSense2Touch
 
 		// The one place that reconciles the engine with (what the user wants, whether the Shell is up).
 		private void ApplyState() {
+			var provider = this.pixelSenseToTouchProvider;
+			if (provider == null) return;   // shut down
 			bool suspended = this.watchShellMenuItem.Checked && this.shellPresent;
 			bool shouldRun = this.userWantsRunning && !suspended;
 
-			if (shouldRun) this.pixelSenseToTouchProvider.InitEventHandlers();
-			else this.pixelSenseToTouchProvider.RemoveEventHandlers();
+			if (shouldRun) provider.InitEventHandlers();
+			else provider.RemoveEventHandlers();
 
 			this.startMenuItem.Enabled = !this.userWantsRunning;
 			this.stopMenuItem.Enabled = this.userWantsRunning;
@@ -211,17 +279,40 @@ namespace PixelSense2Touch
 				status = "Touch: stopped";                                    shortStatus = "stopped";
 			} else if (suspended) {
 				status = "Touch: suspended - Surface Shell is running";       shortStatus = "suspended (Surface Shell)";
-			} else if (this.pixelSenseToTouchProvider.IsRunning) {
-				status = "Touch: running";                                    shortStatus = "running";
+			} else if (provider.IsRunning) {
+				// Deliberately does NOT claim UAC. The HID digitizer clears UIPI, so elevated
+				// windows work - but the UAC prompt lives on the secure desktop, where SurfaceInput
+				// freezes (measured: 0% CPU for the whole prompt) and therefore produces no contacts
+				// to forward. UAC and the lock screen need the session-0 service, not this app.
+				status = provider.SinkReachesElevated
+					? "Touch: running - includes elevated admin windows"
+					: "Touch: running - NOT on elevated windows";
+				shortStatus = "running";
 			} else {
-				status = "Touch: unavailable - touch injection failed to start"; shortStatus = "unavailable";
+				status = "Touch: unavailable - no touch sink could be started"; shortStatus = "unavailable";
 			}
 
 			this.statusMenuItem.Text = status;
+			this.shortStatus = shortStatus;
+			this.RefreshHintStatus();
+		}
+
+		// The idle-hint read-out next to the Touch line, and the tooltip. Only text; it never
+		// touches the engine, so it is safe to call from the poll tick and the menu's Opening.
+		private void RefreshHintStatus() {
+			var provider = this.pixelSenseToTouchProvider;
+			if (provider == null) return;
+			string hint = provider.IdleHintStatus;
+			this.hintMenuItem.Text = hint;
 			// The tooltip keeps the app's NAME - it is the only thing identifying this tray icon -
 			// and appends the short status. NotifyIcon.Text throws above 63 characters.
-			string tip = "PixelSenseToTouch - " + shortStatus;
+			bool hintOn = provider.IdleHint != null && provider.IdleHint.IsOn;
+			string tip = "PixelSenseToTouch - " + this.shortStatus + (hintOn ? ", hint on" : ", hint off");
 			this.notifyIcon.Text = tip.Length <= 63 ? tip : tip.Substring(0, 63);
+		}
+
+		private void HandleMenuOpening(object sender, System.ComponentModel.CancelEventArgs e) {
+			this.RefreshHintStatus();
 		}
 
 		private void HandleStopRequest(object sender, EventArgs e) {
@@ -237,6 +328,7 @@ namespace PixelSense2Touch
 		private void HandleAboutRequest(object sender, EventArgs e) {
 			// Version is read from the assembly so this box cannot go stale on a rebuild.
 			string ver = Assembly.GetExecutingAssembly().GetName().Version.ToString();
+			var provider = this.pixelSenseToTouchProvider;
 			MessageBox.Show(
 				"PixelSenseToTouch " + ver + "\n" +
 				"Surface 1.0 (PixelSense) to Windows touch bridge.\n\n" +
@@ -259,6 +351,19 @@ namespace PixelSense2Touch
 				"finger twice. Your own Stop always wins, and the behaviour can be switched off " +
 				"from the tray menu.\n\n" +
 
+				"  •  A pluggable output path (2.2).  Where the HydraTouch HID digitizer is " +
+				"installed the same contacts go out as kernel HID reports, which reach elevated " +
+				"(admin) windows that user-mode touch injection cannot; otherwise touch injection " +
+				"is used exactly as before. Neither path covers the UAC prompt or the lock screen - " +
+				"they run on the secure desktop, where Surface Input produces no contacts; those " +
+				"need the Hydra Touch session-0 service.\n" +
+				"     Input path now: " + (provider?.SinkDetail ?? "not started") + "\n\n" +
+
+				"  •  An idle hint for the camera driver (2.3).  The running contact count is " +
+				"sent to the HydraX64Beta driver so its IdleMask gate knows when the table is " +
+				"empty; inert on the production driver or when not elevated.\n" +
+				"     Idle hint now: " + (provider?.IdleHintStatus ?? "stopped") + "\n\n" +
+
 				"  •  A new tray icon.\n\n" +
 
 				"Built on PixelSense2Touch by Boaz Pat-El - MIT license\n" +
@@ -269,15 +374,38 @@ namespace PixelSense2Touch
 
 #if DEBUG
 		private void HandleDebugRequest(object sender, EventArgs e) {
-			MessageBox.Show($"{this.pixelSenseToTouchProvider.debuginfo}");
+			MessageBox.Show($"{this.pixelSenseToTouchProvider?.debuginfo}");
 		}
 #endif
 
 		private void HandleExitRequest(object sender, EventArgs e) {
 			this.shellWatchTimer.Stop();
-			this.pixelSenseToTouchProvider.CleanUp();   // detaches + releases any pointer still down
-			this.pixelSenseToTouchProvider = null; // Dispose the touch provider
+			this.Shutdown();
 			base.ExitThreadCore();
+		}
+
+		private void HandleApplicationExit(object sender, EventArgs e) {
+			this.Shutdown();
+		}
+
+		private void HandleSessionEnding(object sender, SessionEndingEventArgs e) {
+			this.Shutdown();
+		}
+
+		// Tear the engine down exactly once, whichever exit path gets here first: detach + release
+		// any pointer still down, send the idle-hint goodbye, close the sink. Safe to call from any
+		// thread (SessionEnding need not arrive on the UI thread) and repeatedly; the UI-thread
+		// timer is left to its own tick, which stops it once the provider is gone.
+		private void Shutdown() {
+			PixelSenseToTouch provider;
+			lock (this.shutdownLock) {
+				provider = this.pixelSenseToTouchProvider;
+				this.pixelSenseToTouchProvider = null;
+			}
+			if (provider == null) return;
+			try { SystemEvents.SessionEnding -= new SessionEndingEventHandler(HandleSessionEnding); } catch { }
+			try { provider.CleanUp(); }
+			catch (Exception ex) { Debug.WriteLine($"{DateTime.Now}: CleanUp failed: {ex}"); }
 		}
 	}
 }
