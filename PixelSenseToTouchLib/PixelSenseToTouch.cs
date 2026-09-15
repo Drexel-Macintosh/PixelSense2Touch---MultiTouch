@@ -63,6 +63,11 @@ namespace PixelSenseToTouchLib
         // Occupancy hint for the driver's IdleMask gate (see HydraIdleHint). Lives for the whole
         // life of the ContactTarget, independent of the injection handlers and of the sink.
         public HydraIdleHint IdleHint { get; private set; }
+
+        // Per-table affine correction of the runtime's contact positions (see TouchCalibration).
+        // Loaded once at Init; identity unless the calibration script wrote values.
+        public TouchCalibration Calibration { get; private set; }
+        private static TouchCalibration calibration = TouchCalibration.Load();
         public string IdleHintStatus { get { return this.IdleHint?.Status ?? "idle hint: off: not started"; } }
 
         private NativeWindow window;
@@ -98,6 +103,9 @@ namespace PixelSenseToTouchLib
 #if DEBUG
             this.debuginfo = new StringBuilder();
 #endif
+
+            this.Calibration = calibration;
+            Debug.WriteLine($"{DateTime.Now}: Touch calibration: {calibration.Source}");
 
             Debug.Write($"{DateTime.Now}: Create native window with handle... ");
             this.window = new NativeWindow();
@@ -231,12 +239,16 @@ namespace PixelSenseToTouchLib
 
         private static void FillGeometry(ref PointerTouchInfo info, Contact contact)
         {
-            info.PointerInfo.PtPixelLocation.X = (int)contact.X;
-            info.PointerInfo.PtPixelLocation.Y = (int)contact.Y;
-            info.ContactArea.left = (int)contact.Bounds.Left;
-            info.ContactArea.right = (int)contact.Bounds.Right;
-            info.ContactArea.top = (int)contact.Bounds.Top;
-            info.ContactArea.bottom = (int)contact.Bounds.Bottom;
+            // The runtime's coordinates are already screen pixels; the calibration undoes the
+            // table-specific linear error measured with HydraTargets/HydraScore (identity when not
+            // calibrated). Rounded, not truncated: (int) alone biased every contact up-left by ~0.5 px.
+            TouchCalibration c = calibration;
+            info.PointerInfo.PtPixelLocation.X = (int)Math.Round(c.MapX(contact.X));
+            info.PointerInfo.PtPixelLocation.Y = (int)Math.Round(c.MapY(contact.Y));
+            info.ContactArea.left = (int)Math.Round(c.MapX(contact.Bounds.Left));
+            info.ContactArea.right = (int)Math.Round(c.MapX(contact.Bounds.Right));
+            info.ContactArea.top = (int)Math.Round(c.MapY(contact.Bounds.Top));
+            info.ContactArea.bottom = (int)Math.Round(c.MapY(contact.Bounds.Bottom));
         }
 
         private void HandleAdd(object sender, ContactEventArgs e)

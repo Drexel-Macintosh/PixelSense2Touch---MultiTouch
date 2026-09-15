@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -39,5 +39,9 @@ using System.Runtime.InteropServices;
 // driver). Bumped past the staged sink-only 2.2.0.0 for the same reason.
 // 2.3.1.0 makes injection the default sink again (2.2/2.3 preferred the digitizer when it was
 // installed); the HID sink is opt-in via PIXELSENSETOUCH_SINK=hid until its flashing is understood.
-[assembly: AssemblyVersion("2.3.1.0")]
-[assembly: AssemblyFileVersion("2.3.1.0")]
+// 2.3.2.0 adds the per-table touch calibration (TouchCalibration: an affine correction of the
+// runtime's contact positions, from HKLM\SOFTWARE\Surface1Hydra\PixelSenseToTouch, written by
+// dist\scripts\Calibrate-Touch.ps1 from a HydraTargets/HydraScore run) and rounds instead of
+// truncating the injected pixel positions.
+[assembly: AssemblyVersion("2.3.2.0")]
+[assembly: AssemblyFileVersion("2.3.2.0")]

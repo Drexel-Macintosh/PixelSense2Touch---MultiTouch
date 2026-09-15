@@ -80,6 +80,7 @@ $libSrc = @(
     (Join-Path $lib "HidDigitizerSink.cs"),
     (Join-Path $lib "HydraIdleHint.cs"),
     (Join-Path $lib "PixelSenseToTouch.cs"),
+    (Join-Path $lib "TouchCalibration.cs"),
     (Join-Path $lib "Properties\AssemblyInfo.cs")
 )
 foreach ($s in $libSrc) { if (-not (Test-Path $s)) { throw "Missing source: $s" } }
