@@ -50,8 +50,8 @@ namespace PixelSenseToTouchLib
         // started, so attaching the handlers would only pretend to be running.
         private ITouchSink sink;
 
-        // Which sink to prefer. Set before Init(); Auto defers to the PIXELSENSETOUCH_SINK
-        // environment variable and otherwise prefers the digitizer.
+        // Which sink to use. Set before Init(); Auto defers to the PIXELSENSETOUCH_SINK
+        // environment variable and otherwise injects (the digitizer is opt-in - see ITouchSink).
         public TouchSinkMode SinkMode { get; set; }
 
         // How sink selection actually went - surfaced by the tray, because the difference between
