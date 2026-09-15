@@ -326,50 +326,18 @@ namespace PixelSense2Touch
 		}
 
 		private void HandleAboutRequest(object sender, EventArgs e) {
+			// Credits only. The original author and his work come first; this is his program,
+			// extended. Live state is on the tray menu itself; everything else is in the README.
 			// Version is read from the assembly so this box cannot go stale on a rebuild.
 			string ver = Assembly.GetExecutingAssembly().GetName().Version.ToString();
-			var provider = this.pixelSenseToTouchProvider;
 			MessageBox.Show(
-				"PixelSenseToTouch " + ver + "\n" +
-				"Surface 1.0 (PixelSense) to Windows touch bridge.\n\n" +
-
-				"Turns the touches seen by a Microsoft Surface 1.0 table into real Windows " +
-				"multi-touch. It rides on top of Surface Input, which owns the camera and " +
-				"produces the contacts.\n\n" +
-
-				"Version 2 was created as a part of the Hydra x64 Project by Joe LiTrenta and is " +
-				"a fork of PixelSense2Touch by Boaz Pat-El. What the fork adds:\n\n" +
-
-				"  •  Multi-touch.  The original injected one pointer and emulated clicks " +
-				"with a mouse simulator. Every contact is now injected as its own Windows touch " +
-				"pointer, so Windows performs the gestures itself - tap, press-and-hold, drag, " +
-				"pinch and zoom - and many fingers track at once.\n\n" +
-
-				"  •  Automatic stop and start around the Surface Shell.  The Shell handles " +
-				"Surface contacts natively, so while it is running this app suspends itself, and " +
-				"it resumes when you exit the Shell. Without that the Shell would see every " +
-				"finger twice. Your own Stop always wins, and the behaviour can be switched off " +
-				"from the tray menu.\n\n" +
-
-				"  •  A pluggable output path (2.2).  Touch injection is the default, exactly as " +
-				"before. With PIXELSENSETOUCH_SINK=hid the same contacts go out through the " +
-				"HydraTouch HID digitizer as kernel HID reports instead, which reach elevated " +
-				"(admin) windows that injection cannot - opt-in for now, because a held contact " +
-				"can flash on that path. Neither path covers the UAC prompt or the lock screen - " +
-				"they run on the secure desktop, where Surface Input produces no contacts; those " +
-				"need the Hydra Touch session-0 service.\n" +
-				"     Input path now: " + (provider?.SinkDetail ?? "not started") + "\n\n" +
-
-				"  •  An idle hint for the camera driver (2.3).  The running contact count is " +
-				"sent to the HydraX64Beta driver so its IdleMask gate knows when the table is " +
-				"empty; inert on the production driver or when not elevated.\n" +
-				"     Idle hint now: " + (provider?.IdleHintStatus ?? "stopped") + "\n\n" +
-
-				"  •  A new tray icon.\n\n" +
-
-				"Built on PixelSense2Touch by Boaz Pat-El - MIT license\n" +
+				"PixelSense2Touch by Boaz Pat-El\n" +
+				"The Surface 1.0 (PixelSense) to Windows touch bridge - MIT license.\n" +
 				"http://www.boazpatel.com\n" +
-				"https://github.com/Heer-Boaz/PixelSense2Touch",
+				"https://github.com/Heer-Boaz/PixelSense2Touch\n\n" +
+
+				"PixelSenseToTouch " + ver + " is the multi-touch fork of that work, maintained as\n" +
+				"part of the Surface1-Hydra-x64 project by Joe LiTrenta.",
 				"About PixelSenseToTouch", MessageBoxButtons.OK, MessageBoxIcon.Information);
 		}
 
