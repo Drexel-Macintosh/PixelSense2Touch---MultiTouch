@@ -128,5 +128,5 @@ if ($Stage) {
     Write-Host "Staging into $dist ..." -ForegroundColor Cyan
     Copy-Item (Join-Path $out "PixelSenseToTouch.exe") $dist -Force
     Copy-Item (Join-Path $out "PixelSenseToTouchLib.dll") $dist -Force
-    Write-Host "Staged. The digitizer sink is active whenever HydraTouch is installed." -ForegroundColor Green
+    Write-Host "Staged. Injection is the default sink; PIXELSENSETOUCH_SINK=hid opts into the HydraTouch digitizer." -ForegroundColor Green
 }

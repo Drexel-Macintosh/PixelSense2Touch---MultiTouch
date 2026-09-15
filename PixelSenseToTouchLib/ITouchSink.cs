@@ -19,6 +19,13 @@ namespace PixelSenseToTouchLib
     // virtual HID digitizer, whose reports enter the input stack in the kernel, below UIPI and below
     // desktop isolation, exactly like a physical touchscreen. Same frames, same pixels - but they
     // land on elevated windows, the lock screen and the UAC prompt.
+    //
+    // STATUS (2026-09-14): the HID sink is OPT-IN. Measured on the table, a finger held still
+    // through it FLASHES - the runtime's own contact list flickers Added/Removed - while the same
+    // build through injection holds solid (the camera driver was ruled out with identical masks).
+    // Until that is understood, injection is the default and the digitizer is used only when
+    // PIXELSENSETOUCH_SINK=hid asks for it. The Surface1-Hydra-x64 "Everywhere" mode does not need
+    // this sink for UAC / the lock screen: its session-0 service feeds the digitizer directly.
     public interface ITouchSink : IDisposable
     {
         // Shown in the tray status, so whichever path is live is never a guess.
@@ -38,9 +45,9 @@ namespace PixelSenseToTouchLib
 
     public enum TouchSinkMode
     {
-        // Prefer the HID digitizer when it is installed, fall back to injection. This is the
-        // default because the digitizer is strictly better where they overlap and the only one
-        // that works where they don't (elevated windows, lock screen, UAC).
+        // Defer to PIXELSENSETOUCH_SINK; without it, injection - the path this app has always
+        // used and the one validated on the table. (2.2.0.0 preferred the digitizer here; see the
+        // STATUS note above for why that was reversed.)
         Auto,
         Hid,
         Inject
@@ -48,7 +55,8 @@ namespace PixelSenseToTouchLib
 
     public static class TouchSink
     {
-        // Optional override, for falling back without reinstalling or for comparing the two paths:
+        // Opt into the HID digitizer, or state injection explicitly:
+        //   set PIXELSENSETOUCH_SINK=hid
         //   set PIXELSENSETOUCH_SINK=inject
         public const string ModeVariable = "PIXELSENSETOUCH_SINK";
 
@@ -56,26 +64,29 @@ namespace PixelSenseToTouchLib
         {
             string v;
             try { v = Environment.GetEnvironmentVariable(ModeVariable); }
-            catch { return TouchSinkMode.Auto; }
+            catch { return TouchSinkMode.Inject; }
 
-            if (string.IsNullOrEmpty(v)) return TouchSinkMode.Auto;
+            if (string.IsNullOrEmpty(v)) return TouchSinkMode.Inject;
             v = v.Trim();
             if (v.Equals("hid", StringComparison.OrdinalIgnoreCase)) return TouchSinkMode.Hid;
             if (v.Equals("inject", StringComparison.OrdinalIgnoreCase)) return TouchSinkMode.Inject;
-            return TouchSinkMode.Auto;
+            return TouchSinkMode.Inject;
         }
 
         // Returns a started sink, or null if none could be started. detail always explains the
-        // outcome - including why a preferred sink was passed over - so a silent downgrade from
-        // "works on UAC" to "does not" can never happen unnoticed.
+        // outcome - including why a requested sink was passed over - so the difference between
+        // "works on elevated windows" and "does not" can never go unnoticed.
         public static ITouchSink Select(TouchSinkMode mode, int maxContacts, out string detail)
         {
-            if (mode != TouchSinkMode.Inject)
+            if (mode == TouchSinkMode.Auto) mode = ModeFromEnvironment();
+
+            if (mode == TouchSinkMode.Hid)
             {
                 var hid = new HidDigitizerSink();
                 if (hid.Start(maxContacts))
                 {
-                    detail = "using the " + hid.Name + " - touch reaches elevated windows and UAC.";
+                    detail = "using the " + hid.Name + " (" + ModeVariable + "=hid) - touch reaches elevated windows and UAC. " +
+                             "NOTE: this path is still under investigation (held contacts can flash).";
                     return hid;
                 }
 
@@ -85,13 +96,11 @@ namespace PixelSenseToTouchLib
                       (hid.LastError == 5 ? " - access denied; run elevated" : "") + ")";
                 hid.Dispose();
 
-                if (mode == TouchSinkMode.Hid) { detail = "HID sink requested but " + why + "."; return null; }
-
                 var fallback = new InjectTouchSink();
                 if (fallback.Start(maxContacts))
                 {
-                    detail = "using " + fallback.Name + " (" + why +
-                             "). Touch will NOT work on elevated windows or UAC prompts.";
+                    detail = "using " + fallback.Name + " - " + ModeVariable + "=hid was requested but " + why +
+                             ". Touch will NOT work on elevated windows or UAC prompts.";
                     return fallback;
                 }
                 fallback.Dispose();
@@ -102,8 +111,8 @@ namespace PixelSenseToTouchLib
             var inject = new InjectTouchSink();
             if (inject.Start(maxContacts))
             {
-                detail = "using " + inject.Name +
-                         " (forced). Touch will NOT work on elevated windows or UAC prompts.";
+                detail = "using " + inject.Name + " (the default; set " + ModeVariable + "=hid to try the HydraTouch " +
+                         "digitizer). Touch will NOT work on elevated windows or UAC prompts.";
                 return inject;
             }
             inject.Dispose();

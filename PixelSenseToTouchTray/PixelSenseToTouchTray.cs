@@ -351,10 +351,11 @@ namespace PixelSense2Touch
 				"finger twice. Your own Stop always wins, and the behaviour can be switched off " +
 				"from the tray menu.\n\n" +
 
-				"  •  A pluggable output path (2.2).  Where the HydraTouch HID digitizer is " +
-				"installed the same contacts go out as kernel HID reports, which reach elevated " +
-				"(admin) windows that user-mode touch injection cannot; otherwise touch injection " +
-				"is used exactly as before. Neither path covers the UAC prompt or the lock screen - " +
+				"  •  A pluggable output path (2.2).  Touch injection is the default, exactly as " +
+				"before. With PIXELSENSETOUCH_SINK=hid the same contacts go out through the " +
+				"HydraTouch HID digitizer as kernel HID reports instead, which reach elevated " +
+				"(admin) windows that injection cannot - opt-in for now, because a held contact " +
+				"can flash on that path. Neither path covers the UAC prompt or the lock screen - " +
 				"they run on the secure desktop, where Surface Input produces no contacts; those " +
 				"need the Hydra Touch session-0 service.\n" +
 				"     Input path now: " + (provider?.SinkDetail ?? "not started") + "\n\n" +

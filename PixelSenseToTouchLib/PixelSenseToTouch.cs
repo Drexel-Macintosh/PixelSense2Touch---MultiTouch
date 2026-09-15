@@ -16,10 +16,10 @@ namespace PixelSenseToTouchLib
     // pointers reach Windows, the OS performs gesture recognition itself (tap = click,
     // press-and-hold = right-click, drag, pinch/zoom), so no mouse emulation is needed.
     //
-    // How a finished frame reaches Windows is a pluggable last step - see ITouchSink. Where the
-    // HydraTouch HID digitizer is installed it is used in preference to InjectTouchInput, because
-    // injected input is blocked by UIPI from elevated windows and never reaches the UAC secure
-    // desktop, whereas kernel HID reports reach both. Everything above the sink - contact tracking,
+    // How a finished frame reaches Windows is a pluggable last step - see ITouchSink. Injection is
+    // the default; with PIXELSENSETOUCH_SINK=hid the same frames go to the HydraTouch HID digitizer
+    // instead, because injected input is blocked by UIPI from elevated windows and never reaches the
+    // UAC secure desktop, whereas kernel HID reports reach both. Everything above the sink - contact tracking,
     // pointer-id assignment, frame assembly, the held-frame skip - is identical either way.
     //
     // This replaces the earlier model that injected touch only for multi-finger cases
@@ -131,10 +131,10 @@ namespace PixelSenseToTouchLib
             this.IdleHint.Open();
             Debug.WriteLine($"[{this.IdleHint.Status}]");
 
-            // Choose and start the output sink. The HID digitizer is preferred wherever it is
-            // installed: it is the only path whose input crosses UIPI and the secure desktop, so it
-            // is the difference between touch working on an elevated window or a UAC prompt and not.
-            // Without it we fall back to injection and behave exactly as this app always has.
+            // Choose and start the output sink. Injection is the default - the path this app has
+            // always used and the one validated on the table. The HydraTouch HID digitizer (the only
+            // path whose input crosses UIPI, so touch reaches elevated windows) is opt-in through
+            // PIXELSENSETOUCH_SINK=hid while its held-contact flashing is investigated - see ITouchSink.
             Debug.Write($"{DateTime.Now}: Selecting touch sink... ");
             if (this.SinkMode == TouchSinkMode.Auto) this.SinkMode = TouchSink.ModeFromEnvironment();
             string detail;
